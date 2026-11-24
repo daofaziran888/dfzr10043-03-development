@@ -1,4 +1,4 @@
-"""跨模块数据链路：把22个独立领域服务串联成10条端到端生产流水线。
+"""跨模块数据链路：把领域服务串联成11条端到端生产流水线。
 
 每条链路从上游模块取输入数据，做领域校验、转换与状态推进后，把产物写入下游模块：
 链路1  流程模板发布 → 排程触发 → 任务队列派发 → 机器人节点执行 → 步骤轨迹
@@ -11,10 +11,12 @@
 链路8  资源额度耗尽 → 机器人节点降级 → 任务队列回收
 链路9  OCR识别区域 → 采集批次归集 → 抽检样本 → 交接包驳回
 链路10 运行指标汇总 → 执行实例逐条核对 → 审计轨迹
+链路11 采集记录 → 采集差额视图（隔离/迟报/缺失）→ 排程漏采核对 → 实际补采
 
 额外能力：水位推进（data_landing watermark）、冲突版本仲裁（version_release rollback =
 旧版本胜出）、失败恢复（retry_policy 重试→放弃→审计）、去重（capture_batch 按采集窗
-口与上游来源判重，重复批次不落库）、迟到数据（schedule_plan 生效止日已过则拒绝投递）。
+口与上游来源判重，重复批次不落库）、迟到数据（schedule_plan 生效止日已过则拒绝投递）、
+采集差额（app/gap.py 按实际采集记录逐行对账，迟到回执可复算旧差额，补采只兑现一次）。
 """
 from __future__ import annotations
 
@@ -606,4 +608,58 @@ def summarize_metrics(metric_id: int) -> dict[str, Any]:
         "success_rate_actual": round(actual_success_rate, 4),
         "mismatch": mismatch,
         "audit_id": audit_result["id"],
+    }
+
+# ── 链路11: 流程执行产出 → 采集差额视图 → 排程漏采核对 → 实际补采 ─
+
+def capture_shortfall_to_replenish(
+    run_id: int,
+    records: list[dict[str, Any]],
+    *,
+    handoff_code: str = "",
+    receipt_sources: list[str] | None = None,
+    plan_code: str = "",
+    batch_code: str = "",
+) -> dict[str, Any]:
+    """把一次执行的实际采集记录接进差额视图，并生成可补采来源明细。
+
+    执行列表里的「产出记录数」只是总数；这里按来源逐行落证据，把交接回执
+    对到的行标成已交接，校验隔离的行单独隔离，剩余来源进入确认缺失/待核，
+    最后写排程漏采核对记录。实际补采由排程按核对记录调用
+    `app.gap.dispatch_check` 发起，结果再关联回这一笔差额。
+    """
+    from app import gap
+
+    run = _find_entry("flow_run", run_id)
+    execution_code = str(run.get("执行编号", ""))
+    if not execution_code:
+        raise RuntimeError(f"流程执行 {run_id} 缺少执行编号")
+
+    capture = gap.record_capture(execution_code, records, batch_code=batch_code or None)
+    receipts = [str(source) for source in (receipt_sources or []) if str(source)]
+    receipt_result = (
+        gap.record_receipts(execution_code, receipts, handoff_code=handoff_code)
+        if receipts
+        else {"登记来源": []}
+    )
+
+    view = gap.current_view(execution_code)
+    gap_code = ""
+    check_code = ""
+    if view["摘要"]["缺失来源范围"]:
+        snapshot = gap.create_gap(execution_code, reason="执行产出归集后差额")
+        gap_code = snapshot["差额编号"]
+        if snapshot["待核来源"]:
+            gap.confirm_missing(gap_code, snapshot["待核来源"], operator="交接核对")
+        check_code = gap.create_schedule_check(gap_code, plan_code=plan_code)["核对编号"]
+
+    return {
+        "status": "gap_created" if gap_code else "no_gap",
+        "run_id": run_id,
+        "执行编号": execution_code,
+        "证据": capture,
+        "回执": receipt_result,
+        "摘要": view["摘要"],
+        "差额编号": gap_code,
+        "核对编号": check_code,
     }

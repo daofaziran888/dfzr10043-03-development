@@ -33,21 +33,39 @@ def is_dirty_row(row: dict[str, Any], required_fields: list[str]) -> bool:
 
 def dedup_by_window(rows: list[dict[str, Any]], key_fields: list[str],
                     window_days: int = 1) -> list[dict[str, Any]]:
-    """按采集窗口去重：相同时窗口内相同键字段的重复行只保留第一条。"""
+    """按采集窗口去重：相同键在窗口内只保留第一条。
+
+    窗口以本批数据里最新的生成时间为锚点（采集窗口由数据自身定义），
+    而不是以“现在”为锚点，这样补跑历史批次时不会因为日期久远把整批
+    都判成窗口外而丢空。
+    """
+    tz = timezone(timedelta(hours=8))
+
+    def _parsed(row: dict[str, Any]) -> datetime | None:
+        gen_time = row.get("生成时间", "") or row.get("入队时间", "") or ""
+        if not gen_time:
+            return None
+        try:
+            row_dt = datetime.fromisoformat(str(gen_time))
+        except (ValueError, TypeError):
+            return None
+        if row_dt.tzinfo is None:
+            row_dt = row_dt.replace(tzinfo=tz)
+        return row_dt
+
+    parsed = [_parsed(row) for row in rows]
+    known = [value for value in parsed if value is not None]
+    anchor = max(known) if known else datetime.now(tz)
+
     seen: set[str] = set()
     result = []
-    tz = timezone(timedelta(hours=8))
-    now = datetime.now(tz)
-    for row in rows:
+    for row, row_dt in zip(rows, parsed):
         key = "|".join(str(row.get(f, "")) for f in key_fields)
-        gen_time = row.get("生成时间", "") or row.get("入队时间", "") or ""
-        try:
-            row_dt = datetime.fromisoformat(gen_time)
-            if row_dt.tzinfo is None:
-                row_dt = row_dt.replace(tzinfo=tz)
-        except (ValueError, TypeError):
-            row_dt = now
-        in_window = abs((now - row_dt).days) <= window_days
+        if row_dt is None:
+            # 缺生成时间的行无法判断窗口，按新数据保留，只参与键去重。
+            in_window = True
+        else:
+            in_window = abs((anchor - row_dt).days) <= window_days
         if key not in seen and in_window:
             seen.add(key)
             result.append(row)

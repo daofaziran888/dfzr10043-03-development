@@ -8,15 +8,29 @@ from typing import Any
 
 from app.seed import SEED_ROWS
 
+# 内部表：前缀 `_`，供采集差额视图和排程漏采核对使用，不计入业务模块与运营概览。
+INTERNAL_TABLES = (
+    "_gap_evidence",
+    "_gap_receipt",
+    "_gap_missing",
+    "_gap_gap",
+    "_gap_claim",
+    "_gap_request",
+    "_shortfall_check",
+)
+
 
 class Store:
     def __init__(self) -> None:
         self._tables: dict[str, list[dict[str, Any]]] = {
             name: [dict(row) for row in rows] for name, rows in SEED_ROWS.items()
         }
+        # 内部表：采集差额视图与排程漏采核对使用，前缀 `_`，不进入业务模块列表。
+        for name in INTERNAL_TABLES:
+            self._tables.setdefault(name, [])
 
     def module_names(self) -> list[str]:
-        return sorted(self._tables)
+        return sorted(name for name in self._tables if not name.startswith("_"))
 
     def rows(self, module: str) -> list[dict[str, Any]]:
         return self._tables.setdefault(module, [])
@@ -50,6 +64,8 @@ class Store:
         self._tables = {
             name: [dict(row) for row in rows] for name, rows in SEED_ROWS.items()
         }
+        for name in INTERNAL_TABLES:
+            self._tables.setdefault(name, [])
 
 
 store = Store()

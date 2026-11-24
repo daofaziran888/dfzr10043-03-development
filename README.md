@@ -73,6 +73,10 @@ npm run dev
 | 抽检样本 | `sample_check` | 抽检样本 | 样本编号、关联批次、抽样比例 |
 | 交接包 | `handoff_pack` | 交接包 | 交接编号、关联批次、目标系统 |
 
+> 采集差额视图（前端 `/capture_gap`）不在模块列表里：它按**实际采集记录**逐行关联
+> 采集、交接、校验隔离与迟到回执，输出可补采的来源明细，内部表以 `_` 前缀存放，
+> 不改变上面 22 个业务模块的数量与运营概览。
+
 ## 约定
 
 - 全部模块共享`frontend/src/views/WorkbenchView.vue|tsx`和一套资源路由。
@@ -80,6 +84,8 @@ npm run dev
   `frontend/src/domain/<模块>.ts`，用于承载真实业务差异并维持36题位容量。
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
+- 采集差额的领域逻辑在 `app/gap.py`，固定路由在 `app/routers/gap.py`，必须排在
+  `/api/{module}` 之前注册。
 
 领域：数据工程
 子方向：数据采集、爬虫与RPA
